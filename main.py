@@ -104,6 +104,11 @@ def main():
         target_size=256,
     ).to(device)
 
+    # Optional: simple DataParallel across all visible GPUs (helps utilize 2×T4)
+    if torch.cuda.device_count() > 1:
+        print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
+
     criterion = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
