@@ -1,95 +1,83 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
 import torchvision.transforms as transforms
-from architech.archi import VisionMoEViT, HybridBackboneMoE, HybridClassifier
-import os
-
 from datasets import load_dataset
 
+from architech.archi import TextToImageModel, tokenize_batch
+
+# Image preprocessing for generator (range [-1, 1]); now 256x256
+transform_image = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+])
+
+
 def get_dataloaders(batch_size=128):
-    print("Preparing data with HF datasets...")
-    dataset = load_dataset("uoft-cs/cifar100")
-    
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-
-    def train_transforms(examples):
-        pixel_values = [transform_train(image.convert("RGB")) for image in examples['img']]
-        return {'pixel_values': pixel_values, 'label': examples['fine_label']}
-
-    def test_transforms(examples):
-        pixel_values = [transform_test(image.convert("RGB")) for image in examples['img']]
-        return {'pixel_values': pixel_values, 'label': examples['fine_label']}
-
-    dataset['train'].set_transform(train_transforms)
-    dataset['test'].set_transform(test_transforms)
+    """
+    Uses a small HF dataset with captions: UCSC-VLAA/Recap-COCO-30K.
+    Fields: image (PIL), recaption (caption).
+    """
+    dataset = load_dataset("UCSC-VLAA/Recap-COCO-30K")
 
     def collate_fn(batch):
-        pixel_values = torch.stack([item['pixel_values'] for item in batch])
-        labels = torch.tensor([item['label'] for item in batch])
-        return pixel_values, labels
+        images = torch.stack([transform_image(item["image"].convert("RGB")) for item in batch])
+        texts = [item["recaption"] for item in batch]
+        token_ids, lengths = tokenize_batch(texts, vocab_size=4096, max_len=16)
+        return images, token_ids, lengths
 
-    trainloader = torch.utils.data.DataLoader(dataset['train'], batch_size=batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn)
-    testloader = torch.utils.data.DataLoader(dataset['test'], batch_size=batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn)
-    
+    trainloader = torch.utils.data.DataLoader(dataset['train'], batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn)
+    # The dataset has no official val split; use a small held-out subset for quick eval
+    val_subset = dataset['train'].select(range(0, min(500, len(dataset['train']))))
+    testloader = torch.utils.data.DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
+
     return trainloader, testloader
+
 
 def train(model, trainloader, criterion, optimizer, device, epoch):
     model.train()
     running_loss = 0.0
-    correct = 0
-    total = 0
-    
-    for i, (inputs, labels) in enumerate(trainloader):
-        inputs, labels = inputs.to(device), labels.to(device)
+    for i, (images, token_ids, lengths) in enumerate(trainloader):
+        images = images.to(device)
+        token_ids = token_ids.to(device)
+        lengths = lengths.to(device)
+        noise = torch.randn(images.size(0), model.latent_dim, device=device)
 
         optimizer.zero_grad()
 
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+        outputs = model(token_ids, lengths, noise)
+        loss = criterion(outputs, images)
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
 
         if i % 100 == 99:
-            print(f'[Epoch {epoch}, Batch {i + 1}] loss: {running_loss / 100:.3f} | acc: {100.*correct/total:.3f}%')
+            print(f'[Epoch {epoch}, Batch {i + 1}] L1 loss: {running_loss / 100:.4f}')
             running_loss = 0.0
+
 
 def evaluate(model, testloader, criterion, device):
     model.eval()
     test_loss = 0
-    correct = 0
-    total = 0
     with torch.no_grad():
-        for inputs, labels in testloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-
+        for images, token_ids, lengths in testloader:
+            images = images.to(device)
+            token_ids = token_ids.to(device)
+            lengths = lengths.to(device)
+            noise = torch.randn(images.size(0), model.latent_dim, device=device)
+            outputs = model(token_ids, lengths, noise)
+            loss = criterion(outputs, images)
             test_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
 
-    acc = 100. * correct / total
     avg_loss = test_loss / len(testloader)
-    print(f'Test Loss: {avg_loss:.3f} | Test Acc: {acc:.3f}%')
-    return acc
+    print(f'Val L1 Loss: {avg_loss:.4f}')
+    return -avg_loss  # higher is better for checkpointing
+
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -98,62 +86,45 @@ def main():
     os.makedirs('checkpoints', exist_ok=True)
 
     # Hyperparameters
-    BATCH_SIZE = 128
-    EPOCHS = 10
-    LR = 1e-4
+    BATCH_SIZE = 32
+    EPOCHS = 30
+    LR = 3e-4
     
     # Data
     trainloader, testloader = get_dataloaders(BATCH_SIZE)
 
     # Model
-    print("Initializing VisionMoEViT expert...")
-    vit_model = VisionMoEViT(
-        img_size=32,
-        patch_size=4,
-        in_chans=3,
-        num_classes=10,
-        embed_dim=192,
-        depth=6,
-        num_heads=3,
-        mlp_ratio=4.0,
-        num_experts=4,
-        moe_layers=(2, 3),
-        dropout=0.1
-    )
+    print("Building tiny text-to-image generator...")
+    model = TextToImageModel(
+        vocab_size=4096,
+        text_embed_dim=128,
+        text_hidden_dim=256,
+        latent_dim=64,
+        base_channels=128,
+        target_size=256,
+    ).to(device)
 
-    print("Initializing HybridBackboneMoE...")
-    backbone = HybridBackboneMoE(
-        img_size=32,
-        in_chans=3,
-        embed_dim=192,
-        stem_dim=64,
-        bert_depth=4,
-        bert_heads=3,
-        vit_model=vit_model
-    )
-
-    model = HybridClassifier(backbone, num_classes=100, embed_dim=192).to(device)
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    criterion = nn.L1Loss()
+    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    best_acc = 0.0
+    best_score = float("-inf")
     
     for epoch in range(EPOCHS):
         train(model, trainloader, criterion, optimizer, device, epoch)
-        acc = evaluate(model, testloader, criterion, device)
+        score = evaluate(model, testloader, criterion, device)
         scheduler.step()
 
-        if acc > best_acc:
-            print(f'Saving best model (acc: {acc:.3f}%)')
+        if score > best_score:
+            print(f'Saving best model (score: {score:.4f})')
             torch.save({
-                "backbone": model.backbone.state_dict(),
-                "head": model.head.state_dict(),
-            }, "checkpoints/cifar10_hybrid_moe.pth")
-            best_acc = acc
+                "text_encoder": model.text_encoder.state_dict(),
+                "generator": model.generator.state_dict(),
+            }, "checkpoints/text2img_small.pth")
+            best_score = score
 
     print('Finished Training')
+
 
 if __name__ == '__main__':
     main()
