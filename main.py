@@ -38,14 +38,14 @@ def get_dataloaders(batch_size=128):
     return trainloader, testloader
 
 
-def train(model, trainloader, criterion, optimizer, device, epoch):
+def train(model, trainloader, criterion, optimizer, device, epoch, latent_dim):
     model.train()
     running_loss = 0.0
     for i, (images, token_ids, lengths) in enumerate(trainloader):
         images = images.to(device)
         token_ids = token_ids.to(device)
         lengths = lengths.to(device)
-        noise = torch.randn(images.size(0), model.latent_dim, device=device)
+        noise = torch.randn(images.size(0), latent_dim, device=device)
 
         optimizer.zero_grad()
 
@@ -61,7 +61,7 @@ def train(model, trainloader, criterion, optimizer, device, epoch):
             running_loss = 0.0
 
 
-def evaluate(model, testloader, criterion, device):
+def evaluate(model, testloader, criterion, device, latent_dim):
     model.eval()
     test_loss = 0
     with torch.no_grad():
@@ -69,7 +69,7 @@ def evaluate(model, testloader, criterion, device):
             images = images.to(device)
             token_ids = token_ids.to(device)
             lengths = lengths.to(device)
-            noise = torch.randn(images.size(0), model.latent_dim, device=device)
+            noise = torch.randn(images.size(0), latent_dim, device=device)
             outputs = model(token_ids, lengths, noise)
             loss = criterion(outputs, images)
             test_loss += loss.item()
@@ -109,6 +109,9 @@ def main():
         print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
         model = torch.nn.DataParallel(model)
 
+    # latent_dim needed for noise sampling; handle DataParallel wrapper
+    latent_dim = model.module.latent_dim if isinstance(model, torch.nn.DataParallel) else model.latent_dim
+
     criterion = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -116,15 +119,16 @@ def main():
     best_score = float("-inf")
     
     for epoch in range(EPOCHS):
-        train(model, trainloader, criterion, optimizer, device, epoch)
-        score = evaluate(model, testloader, criterion, device)
+        train(model, trainloader, criterion, optimizer, device, epoch, latent_dim)
+        score = evaluate(model, testloader, criterion, device, latent_dim)
         scheduler.step()
 
         if score > best_score:
             print(f'Saving best model (score: {score:.4f})')
+            target = model.module if isinstance(model, torch.nn.DataParallel) else model
             torch.save({
-                "text_encoder": model.text_encoder.state_dict(),
-                "generator": model.generator.state_dict(),
+                "text_encoder": target.text_encoder.state_dict(),
+                "generator": target.generator.state_dict(),
             }, "checkpoints/text2img_small.pth")
             best_score = score
 
