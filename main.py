@@ -2,15 +2,19 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.transforms as transforms
 from datasets import load_dataset
 
 from architech.archi import TextToImageModel, tokenize_batch
 
-# Image preprocessing for generator (range [-1, 1]); now 256x256
+# Keep a single source of truth for image size to avoid mismatches
+IMAGE_SIZE = 256
+
+# Image preprocessing for generator (range [-1, 1])
 transform_image = transforms.Compose([
-    transforms.Resize((128, 128)),
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -50,6 +54,8 @@ def train(model, trainloader, criterion, optimizer, device, epoch, latent_dim):
         optimizer.zero_grad()
 
         outputs = model(token_ids, lengths, noise)
+        if outputs.shape[-2:] != images.shape[-2:]:
+            outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
         loss = criterion(outputs, images)
         loss.backward()
         optimizer.step()
@@ -71,6 +77,8 @@ def evaluate(model, testloader, criterion, device, latent_dim):
             lengths = lengths.to(device)
             noise = torch.randn(images.size(0), latent_dim, device=device)
             outputs = model(token_ids, lengths, noise)
+            if outputs.shape[-2:] != images.shape[-2:]:
+                outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
             loss = criterion(outputs, images)
             test_loss += loss.item()
 
@@ -101,7 +109,7 @@ def main():
         text_hidden_dim=256,
         latent_dim=64,
         base_channels=128,
-        target_size=256,
+        target_size=IMAGE_SIZE,
     ).to(device)
 
     # Optional: simple DataParallel across all visible GPUs (helps utilize 2×T4)
