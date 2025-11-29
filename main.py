@@ -55,7 +55,7 @@ class ImageTextCollator:
 
     def __call__(self, batch):
         images = torch.stack([self.transform(item["image"].convert("RGB")) for item in batch])
-        texts = [item["text"] for item in batch]
+        texts = [item["recaption"] for item in batch]
         token_ids, lengths = tokenize_batch(texts, vocab_size=4096, max_len=32)
         return images, token_ids
 
@@ -64,7 +64,7 @@ def get_dataloaders(batch_size=128):
     """
     Uses HF dataset with captions: wangherr/coco2017_train_512x_image_caption_canny (image, text).
     """
-    dataset = load_dataset("wangherr/coco2017_train_512x_image_caption_canny")
+    dataset = load_dataset("UCSC-VLAA/Recap-COCO-30K")
 
     # Compute normalization stats from a subset for faster convergence
     mean, std = compute_mean_std(dataset["train"], image_key="image", max_samples=256)
@@ -72,7 +72,7 @@ def get_dataloaders(batch_size=128):
 
     collate = ImageTextCollator(transform_image)
 
-    num_workers = 0 if os.name == "nt" else 4
+    num_workers = 4
     trainloader = torch.utils.data.DataLoader(
         dataset['train'], batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), collate_fn=collate
