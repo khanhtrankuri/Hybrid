@@ -84,7 +84,11 @@ def get_dataloaders(batch_size=128):
         num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), collate_fn=collate
     )
 
-    return trainloader, testloader 
+    # Debug info to ensure consistent epoch length across GPU counts
+    print(f"[Data] train samples: {len(dataset['train'])}, val samples: {len(val_subset)}, "
+          f"batch_size: {batch_size}, steps/epoch (train): {len(trainloader)}")
+
+    return trainloader, testloader
 
 
 def train(model, trainloader, criterion, optimizer, device, epoch, latent_dim):
