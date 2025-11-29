@@ -7,10 +7,11 @@ import torch.optim as optim
 import torchvision.transforms as transforms
 from datasets import load_dataset
 
-from architech.archi import TextToImageModel, tokenize_batch
+from architech.archi import tokenize_batch
+from architech.archi_large import LargeTextToImageModel, LargeT2IConfig
 
 # Keep a single source of truth for image size to avoid mismatches; lower for faster convergence
-IMAGE_SIZE = 128
+IMAGE_SIZE = 256
 
 
 def compute_mean_std(dataset, image_key="image", max_samples=128):
@@ -45,6 +46,20 @@ def build_transform(mean, std):
     ])
 
 
+class ImageTextCollator:
+    """
+    Top-level collate to stay picklable on Windows. Applies transform and tokenization.
+    """
+    def __init__(self, transform):
+        self.transform = transform
+
+    def __call__(self, batch):
+        images = torch.stack([self.transform(item["image"].convert("RGB")) for item in batch])
+        texts = [item["text"] for item in batch]
+        token_ids, lengths = tokenize_batch(texts, vocab_size=4096, max_len=32)
+        return images, token_ids
+
+
 def get_dataloaders(batch_size=128):
     """
     Uses HF dataset with captions: wangherr/coco2017_train_512x_image_caption_canny (image, text).
@@ -55,40 +70,36 @@ def get_dataloaders(batch_size=128):
     mean, std = compute_mean_std(dataset["train"], image_key="image", max_samples=256)
     transform_image = build_transform(mean, std)
 
-    def collate_fn(batch):
-        images = torch.stack([transform_image(item["image"].convert("RGB")) for item in batch])
-        texts = [item["text"] for item in batch]
-        token_ids, lengths = tokenize_batch(texts, vocab_size=4096, max_len=16)
-        return images, token_ids, lengths
+    collate = ImageTextCollator(transform_image)
 
+    num_workers = 0 if os.name == "nt" else 4
     trainloader = torch.utils.data.DataLoader(
         dataset['train'], batch_size=batch_size, shuffle=True,
-        num_workers=4, pin_memory=True, persistent_workers=True, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), collate_fn=collate
     )
     # The dataset has no official val split; use a small held-out subset for quick eval
     val_subset = dataset['train'].select(range(0, min(1000, len(dataset['train']))))
     testloader = torch.utils.data.DataLoader(
         val_subset, batch_size=batch_size, shuffle=False,
-        num_workers=4, pin_memory=True, persistent_workers=True, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), collate_fn=collate
     )
 
-    return trainloader, testloader
+    return trainloader, testloader 
 
 
 def train(model, trainloader, criterion, optimizer, device, epoch, latent_dim):
     model.train()
     running_loss = 0.0
     scaler = torch.cuda.amp.GradScaler(enabled=(device.startswith("cuda")))
-    for i, (images, token_ids, lengths) in enumerate(trainloader):
+    for i, (images, token_ids) in enumerate(trainloader):
         images = images.to(device)
         token_ids = token_ids.to(device)
-        lengths = lengths.to(device)
         noise = torch.randn(images.size(0), latent_dim, device=device)
 
         optimizer.zero_grad()
 
         with torch.cuda.amp.autocast(enabled=(device.startswith("cuda"))):
-            outputs = model(token_ids, lengths, noise)
+            outputs = model(token_ids, noise)
             if outputs.shape[-2:] != images.shape[-2:]:
                 outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
             loss = criterion(outputs, images)
@@ -108,13 +119,12 @@ def evaluate(model, testloader, criterion, device, latent_dim):
     model.eval()
     test_loss = 0
     with torch.no_grad():
-        for images, token_ids, lengths in testloader:
+        for images, token_ids in testloader:
             images = images.to(device)
             token_ids = token_ids.to(device)
-            lengths = lengths.to(device)
             noise = torch.randn(images.size(0), latent_dim, device=device)
             with torch.cuda.amp.autocast(enabled=(device.startswith("cuda"))):
-                outputs = model(token_ids, lengths, noise)
+                outputs = model(token_ids, noise)
                 if outputs.shape[-2:] != images.shape[-2:]:
                     outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
                 loss = criterion(outputs, images)
@@ -133,22 +143,25 @@ def main():
 
     # Hyperparameters
     BATCH_SIZE = 32
-    EPOCHS = 30
+    EPOCHS = 20
     LR = 3e-4
     
     # Data
     trainloader, testloader = get_dataloaders(BATCH_SIZE)
 
-    # Model
-    print("Building tiny text-to-image generator...")
-    model = TextToImageModel(
+    print("Building larger text-to-image generator (Transformer text encoder + ResUpsample generator)...")
+    cfg = LargeT2IConfig(
         vocab_size=4096,
-        text_embed_dim=128,
-        text_hidden_dim=192,
-        latent_dim=32,
-        base_channels=64,
+        max_len=32,
+        text_embed_dim=512,
+        text_heads=8,
+        text_layers=6,
+        text_ff=1024,
+        latent_dim=128,
+        base_channels=256,
         target_size=IMAGE_SIZE,
-    ).to(device)
+    )
+    model = LargeTextToImageModel(cfg).to(device)
 
     # Optional: simple DataParallel across all visible GPUs (helps utilize 2×T4)
     if torch.cuda.device_count() > 1:

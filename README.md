@@ -1,64 +1,58 @@
-# Hybrid Model Project
+# Hybrid Text-to-Image Experiments
 
-This project implements a Hybrid Backbone Mixture of Experts (MoE) model, including training, model merging (M2N2), multi-task fine-tuning, and evaluation.
+Mã nguồn này chứa hai kiến trúc chính:
+- `architech/archi.py`: mô hình nhỏ/tối giản (hybrid MoE backbone + text-to-image toy).
+- `architech/archi_large.py`: mô hình lớn hơn (encoder Transformer MoE + generator FiLM/ResUpsample) phù hợp train trên 1–2 GPU.
 
-## Requirements
+### Cấu trúc file chính
+- `architech/archi.py`: backbone MoE cho phân loại và một text-to-image nhỏ (GRU + conv-transpose).
+- `architech/archi_large.py`: text encoder Transformer dùng MoE FFN (có map expert-to-GPU), positional encoding + CLS pooling; generator upsample kèm FiLM (điều kiện theo text).
+- `main.py`: script train text-to-image; mặc định dùng `LargeTextToImageModel` từ `archi_large.py`. Có tính mean/std động, AMP, DataParallel (nếu >1 GPU).
+- `predict.py`: suy luận/generate ảnh với checkpoint (cần chỉnh cho model bạn dùng).
+- `finetune.py`, `evaluate.py`: tiện ích/khung tham khảo (tùy chỉnh thêm theo nhu cầu).
 
-Install the required Python packages:
+### Yêu cầu môi trường
+- Python + PyTorch + torchvision + datasets (HF) + Pillow + requests (nếu tải URL).
+- GPU khuyến nghị. Với model lớn, 1–2 × T4/V100/3090; điều chỉnh batch/IMAGE_SIZE để tránh OOM.
 
-```bash
-pip install torch torchvision datasets matplotlib numpy
-```
+### Chạy train (model lớn hiện tại trong main.py)
+1. Cài gói:
+   ```bash
+   pip install torch torchvision datasets pillow requests
+   ```
+2. Chỉnh hyper/đường dẫn dataset trong `main.py` nếu cần:
+   - `IMAGE_SIZE` (mặc định 128; tăng/giảm theo VRAM).
+   - Dataset HF: hiện dùng `wangherr/coco2017_train_512x_image_caption_canny` (trường `image`, `text`). Thay tên dataset và key nếu khác.
+   - Batch/Epoch/LR ở phần Hyperparameters.
+3. Train:
+   ```bash
+   python main.py
+   ```
+   - Tự tính mean/std từ subset, bật AMP, DataParallel nếu có >1 GPU.
+   - Checkpoint lưu ở `checkpoints/text2img_small.pth` (gồm `text_encoder`, `generator`).
 
-## Project Structure
+### Suy luận
+- `predict.py` mặc định cho mô hình nhỏ; nếu dùng mô hình lớn, cần chỉnh `load_model` và khởi tạo `LargeTextToImageModel` phù hợp checkpoint của bạn.
+- Ví dụ tổng quát (sau khi chỉnh `predict.py`):
+   ```bash
+   python predict.py --text "a photo of a cat" --checkpoint checkpoints/text2img_small.pth --out cat.png --device cuda
+   ```
 
-- `Hybrid/architech/archi.py`: Defines the model architectures (`VisionMoEViT`, `HybridBackboneMoE`, `HybridClassifier`).
-- `Hybrid/main.py`: Script for training the base models.
-- `Hybrid/merging_model.py`: Script for merging two checkpoints using the M2N2 algorithm.
-- `Hybrid/finetune.py`: Script for multi-task fine-tuning (CIFAR-10 + CIFAR-100) of the merged model.
-- `Hybrid/evaluate.py`: Script for evaluating the model and visualizing predictions.
+### Map expert sang nhiều GPU (MoE text encoder)
+- Trong `main.py`, khi khởi tạo config:
+  ```python
+  cfg = LargeT2IConfig(
+      ...,
+      text_expert_devices=["cuda:0","cuda:0","cuda:1","cuda:1"],  # ví dụ 4 expert chia 2 GPU
+  )
+  model = LargeTextToImageModel(cfg).to("cuda:0")
+  ```
 
-## Usage Instructions
+### Tips cải thiện chất lượng/tốc độ
+- Giảm `IMAGE_SIZE`, `latent_dim`, `base_channels` nếu cần tốc độ/VRAM; tăng để chất lượng cao hơn.
+- Dùng AMP (đã bật sẵn) và pin_memory/num_workers>0 trên Linux để tăng throughput.
+- Loss: hiện tại L1, có thể thêm perceptual/GAN/CLIP loss để ảnh sắc nét hơn.
 
-### 1. Train Base Models
-
-Train the model to generate checkpoints. You may need to run this twice (or modify configurations) to generate different checkpoints for merging (e.g., `cifar100_hybrid_moe.pth` and `cifar10_hybrid_moe.pth`).
-
-```bash
-python Hybrid/main.py
-```
-
-*Note: Check `Hybrid/main.py` to adjust hyperparameters or dataset (CIFAR-10 vs CIFAR-100).*
-
-### 2. Merge Models (M2N2)
-
-Merge two trained checkpoints into a single model.
-
-```bash
-python Hybrid/merging_model.py
-```
-
-This will read `checkpoints/cifar100_hybrid_moe.pth` and `checkpoints/cifar10_hybrid_moe.pth` (make sure these exist) and save the merged model to `checkpoints/cifar_hybrid_moe_merged.pth`.
-
-### 3. Multi-task Fine-tuning
-
-Fine-tune the merged backbone simultaneously on CIFAR-10 and CIFAR-100.
-
-```bash
-python Hybrid/finetune.py
-```
-
-This loads `checkpoints/cifar_hybrid_moe_merged.pth` and saves the fine-tuned model to `checkpoints/cifar_multitask_finetuned.pth`.
-
-### 4. Evaluation and Visualization
-
-Evaluate the fine-tuned model on CIFAR-10 and visualize predictions.
-
-```bash
-python Hybrid/evaluate.py
-```
-
-This will:
-- Load `checkpoints/cifar_multitask_finetuned.pth`.
-- Calculate accuracy on the CIFAR-10 test set.
-- Generate a visualization image `evaluation_results.png` showing predicted vs. true labels.
+### Lưu ý
+- Dataset HF cần kết nối mạng hoặc cache sẵn. Nếu chạy offline, thay bằng dataset cục bộ (ImageFolder + caption).
+- `predict.py` chưa khớp sẵn với model lớn; chỉnh tay nếu bạn muốn generate từ checkpoint mới.

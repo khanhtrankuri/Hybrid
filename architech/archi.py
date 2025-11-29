@@ -479,7 +479,7 @@ def tokenize_batch(texts, vocab_size: int = 4096, max_len: int = 16):
             ids.extend([0] * (max_len - length))
         token_seqs.append(ids)
         lengths.append(length)
-    token_ids = torch.tensor(token_seqs, dtype=torch.long)
+    token_ids = torch.tensor(token_seqs, dtype=torch.long) 
     lengths = torch.tensor(lengths, dtype=torch.long)
     return token_ids, lengths
 
