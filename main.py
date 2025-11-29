@@ -10,7 +10,7 @@ from architech.archi import TextToImageModel, tokenize_batch
 
 # Image preprocessing for generator (range [-1, 1]); now 256x256
 transform_image = transforms.Compose([
-    transforms.Resize((256, 256)),
+    transforms.Resize((128, 128)),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -22,11 +22,11 @@ def get_dataloaders(batch_size=128):
     Uses a small HF dataset with captions: UCSC-VLAA/Recap-COCO-30K.
     Fields: image (PIL), recaption (caption).
     """
-    dataset = load_dataset("UCSC-VLAA/Recap-COCO-30K")
+    dataset = load_dataset("wangherr/coco2017_train_512x_image_caption_canny")
 
     def collate_fn(batch):
         images = torch.stack([transform_image(item["image"].convert("RGB")) for item in batch])
-        texts = [item["recaption"] for item in batch]
+        texts = [item["text"] for item in batch]
         token_ids, lengths = tokenize_batch(texts, vocab_size=4096, max_len=16)
         return images, token_ids, lengths
 
