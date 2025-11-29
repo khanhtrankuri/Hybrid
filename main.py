@@ -9,24 +9,51 @@ from datasets import load_dataset
 
 from architech.archi import TextToImageModel, tokenize_batch
 
-# Keep a single source of truth for image size to avoid mismatches
-IMAGE_SIZE = 256
+# Keep a single source of truth for image size to avoid mismatches; lower for faster convergence
+IMAGE_SIZE = 128
 
-# Image preprocessing for generator (range [-1, 1])
-transform_image = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-])
+
+def compute_mean_std(dataset, image_key="image", max_samples=128):
+    """
+    Compute per-channel mean/std over a subset of the dataset.
+    """
+    sums = torch.zeros(3)
+    sq_sums = torch.zeros(3)
+    count = 0
+    to_tensor = transforms.ToTensor()
+    for i, item in enumerate(dataset):
+        if i >= max_samples:
+            break
+        img = item[image_key]
+        if hasattr(img, "convert"):
+            img = img.convert("RGB")
+        t = to_tensor(img)  # [0,1]
+        sums += t.view(3, -1).mean(dim=1)
+        sq_sums += (t.view(3, -1) ** 2).mean(dim=1)
+        count += 1
+    mean = (sums / count).tolist()
+    std = (sq_sums / count - torch.tensor(mean) ** 2).sqrt().tolist()
+    return mean, std
+
+
+def build_transform(mean, std):
+    return transforms.Compose([
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
 
 
 def get_dataloaders(batch_size=128):
     """
-    Uses a small HF dataset with captions: UCSC-VLAA/Recap-COCO-30K.
-    Fields: image (PIL), recaption (caption).
+    Uses HF dataset with captions: wangherr/coco2017_train_512x_image_caption_canny (image, text).
     """
     dataset = load_dataset("wangherr/coco2017_train_512x_image_caption_canny")
+
+    # Compute normalization stats from a subset for faster convergence
+    mean, std = compute_mean_std(dataset["train"], image_key="image", max_samples=256)
+    transform_image = build_transform(mean, std)
 
     def collate_fn(batch):
         images = torch.stack([transform_image(item["image"].convert("RGB")) for item in batch])
@@ -34,10 +61,16 @@ def get_dataloaders(batch_size=128):
         token_ids, lengths = tokenize_batch(texts, vocab_size=4096, max_len=16)
         return images, token_ids, lengths
 
-    trainloader = torch.utils.data.DataLoader(dataset['train'], batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn)
+    trainloader = torch.utils.data.DataLoader(
+        dataset['train'], batch_size=batch_size, shuffle=True,
+        num_workers=4, pin_memory=True, persistent_workers=True, collate_fn=collate_fn
+    )
     # The dataset has no official val split; use a small held-out subset for quick eval
-    val_subset = dataset['train'].select(range(0, min(500, len(dataset['train']))))
-    testloader = torch.utils.data.DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
+    val_subset = dataset['train'].select(range(0, min(1000, len(dataset['train']))))
+    testloader = torch.utils.data.DataLoader(
+        val_subset, batch_size=batch_size, shuffle=False,
+        num_workers=4, pin_memory=True, persistent_workers=True, collate_fn=collate_fn
+    )
 
     return trainloader, testloader
 
@@ -45,6 +78,7 @@ def get_dataloaders(batch_size=128):
 def train(model, trainloader, criterion, optimizer, device, epoch, latent_dim):
     model.train()
     running_loss = 0.0
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.startswith("cuda")))
     for i, (images, token_ids, lengths) in enumerate(trainloader):
         images = images.to(device)
         token_ids = token_ids.to(device)
@@ -53,12 +87,15 @@ def train(model, trainloader, criterion, optimizer, device, epoch, latent_dim):
 
         optimizer.zero_grad()
 
-        outputs = model(token_ids, lengths, noise)
-        if outputs.shape[-2:] != images.shape[-2:]:
-            outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
-        loss = criterion(outputs, images)
-        loss.backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast(enabled=(device.startswith("cuda"))):
+            outputs = model(token_ids, lengths, noise)
+            if outputs.shape[-2:] != images.shape[-2:]:
+                outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
+            loss = criterion(outputs, images)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         running_loss += loss.item()
 
@@ -76,10 +113,11 @@ def evaluate(model, testloader, criterion, device, latent_dim):
             token_ids = token_ids.to(device)
             lengths = lengths.to(device)
             noise = torch.randn(images.size(0), latent_dim, device=device)
-            outputs = model(token_ids, lengths, noise)
-            if outputs.shape[-2:] != images.shape[-2:]:
-                outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
-            loss = criterion(outputs, images)
+            with torch.cuda.amp.autocast(enabled=(device.startswith("cuda"))):
+                outputs = model(token_ids, lengths, noise)
+                if outputs.shape[-2:] != images.shape[-2:]:
+                    outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
+                loss = criterion(outputs, images)
             test_loss += loss.item()
 
     avg_loss = test_loss / len(testloader)
@@ -106,9 +144,9 @@ def main():
     model = TextToImageModel(
         vocab_size=4096,
         text_embed_dim=128,
-        text_hidden_dim=256,
-        latent_dim=64,
-        base_channels=128,
+        text_hidden_dim=192,
+        latent_dim=32,
+        base_channels=64,
         target_size=IMAGE_SIZE,
     ).to(device)
 
