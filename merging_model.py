@@ -4,18 +4,13 @@ import torch
 import copy
 import os
 import sys
-from architech.archi_gan import Generator # Import Generator mới
+from architech.archi_gan import Generator
 from pathlib import Path
-# Thêm path để import từ thư mục architech
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# ----------------------------------------
-# Hàm SLERP và M2N2 Crossover (tái sử dụng)
-# ----------------------------------------
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 def slerp(v0, v1, t, dot_threshold=0.9995):
     """Spherical Linear Interpolation"""
-    # ... (giữ nguyên hàm slerp)
     v0_norm = v0 / torch.norm(v0)
     v1_norm = v1 / torch.norm(v1)
     dot = torch.sum(v0_norm * v1_norm)
@@ -30,14 +25,11 @@ def slerp(v0, v1, t, dot_threshold=0.9995):
     return s0 * v0 + s1 * v1
 
 def m2n2_crossover(model_a, model_b, split_ratio=0.5, mix_ratio=0.5):
-    """Thực hiện M2N2 crossover trên toàn bộ tham số của hai model cùng kiến trúc."""
     print("Flattening parameters...")
     
-    # Lấy state_dict từ 2 model
     state_a = model_a.state_dict()
     state_b = model_b.state_dict()
     
-    # Lọc và sắp xếp các tham số để đảm bảo thứ tự
     param_names = sorted(state_a.keys())
     
     flat_a_list = [state_a[name].view(-1) for name in param_names]
@@ -51,15 +43,12 @@ def m2n2_crossover(model_a, model_b, split_ratio=0.5, mix_ratio=0.5):
     
     print(f"Total parameters: {num_params}. Split index: {split_idx}")
     
-    # Part 1: SLERP
     part1 = slerp(flat_a[:split_idx], flat_b[:split_idx], mix_ratio)
     
-    # Part 2: SLERP với tỉ lệ bổ sung
     part2 = slerp(flat_a[split_idx:], flat_b[split_idx:], 1.0 - mix_ratio)
     
     flat_merged = torch.cat([part1, part2])
     
-    # Tạo model mới để load tham số hợp nhất
     merged_model = copy.deepcopy(model_b) # Kiến trúc B (Generator)
     merged_state_dict = merged_model.state_dict()
     
@@ -74,10 +63,6 @@ def m2n2_crossover(model_a, model_b, split_ratio=0.5, mix_ratio=0.5):
         
     return merged_model
 
-# ----------------------------------------
-# Hàm Main
-# ----------------------------------------
-
 def main():
     # Paths
     ckpt_a_path = 'checkpoints/generator_gan_0_4.pth'
@@ -86,13 +71,10 @@ def main():
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # 1. Khởi tạo kiến trúc Generator
-    # Hai model phải có cùng kiến trúc để hợp nhất
     print("Initializing Generator architectures...")
     gen_a = Generator().to(device)
     gen_b = Generator().to(device)
 
-    # 2. Load state_dict (tham số)
     print(f"Loading checkpoint A: {ckpt_a_path}")
     state_a = torch.load(ckpt_a_path, map_location=device)
     gen_a.load_state_dict(state_a)
@@ -100,19 +82,14 @@ def main():
     print(f"Loading checkpoint B: {ckpt_b_path}")
     state_b = torch.load(ckpt_b_path, map_location=device)
     gen_b.load_state_dict(state_b)
-    
-    # 3. Perform Merge
+
     print("Starting M2N2 Crossover on Generators...")
-    # Sử dụng model_a và model_b (đã load state_dict)
     merged_generator = m2n2_crossover(gen_a, gen_b, split_ratio=0.5, mix_ratio=0.5)
     
-    # 4. Save
     print(f"Saving merged generator to {output_path}")
-    # Lưu state_dict của Generator đã hợp nhất
     torch.save(merged_generator.state_dict(), output_path)
     print("Done.")
 
 if __name__ == '__main__':
-    # Đảm bảo thư mục checkpoints tồn tại
     Path('checkpoints').mkdir(parents=True, exist_ok=True)
     main()
