@@ -12,12 +12,8 @@ from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 import os
 
-# Import kiến trúc mới
 from architech.archi_gan import Generator, Discriminator 
 
-# ----------------------
-# 1. Thiết lập & Tiện ích
-# ----------------------
 seed = 42
 random.seed(seed)
 torch.manual_seed(seed)
@@ -26,9 +22,6 @@ print('Using device:', device)
 OUT_DIR = Path('checkpoints') # Đổi sang folder checkpoints
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ----------------------
-# 2. Dữ liệu & DataLoader
-# ----------------------
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,)) # scale to [-1,1]
@@ -43,10 +36,6 @@ def get_label_indices(dataset, allowed_labels):
     for lab in allowed_labels:
         selected.extend(label_to_indices[lab])
     return selected
-
-# ----------------------
-# 3. Hàm Huấn luyện
-# ----------------------
 
 def train_gan(dataloader, nz=100, epochs=50, lr=2e-4, betas=(0.5, 0.999), save_path='generator.pkl'):
     # Sử dụng Generator/Discriminator đã import
