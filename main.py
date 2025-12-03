@@ -1,202 +1,123 @@
-import os
+# main.py
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-import torchvision.transforms as transforms
-from datasets import load_dataset
+import tqdm
+import random
+from pathlib import Path
+from collections import defaultdict
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+import matplotlib.pyplot as plt
+import os
 
-from architech.archi import tokenize_batch
-from architech.archi_large import LargeTextToImageModel, LargeT2IConfig
+# Import kiến trúc mới
+from architech.archi_gan import Generator, Discriminator 
 
-# Keep a single source of truth for image size to avoid mismatches; lower for faster convergence
-IMAGE_SIZE = 256
+# ----------------------
+# 1. Thiết lập & Tiện ích
+# ----------------------
+seed = 42
+random.seed(seed)
+torch.manual_seed(seed)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print('Using device:', device)
+OUT_DIR = Path('checkpoints') # Đổi sang folder checkpoints
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# ----------------------
+# 2. Dữ liệu & DataLoader
+# ----------------------
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,)) # scale to [-1,1]
+])
+mnist_train = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 
-def compute_mean_std(dataset, image_key="image", max_samples=128):
-    """
-    Compute per-channel mean/std over a subset of the dataset.
-    """
-    sums = torch.zeros(3)
-    sq_sums = torch.zeros(3)
-    count = 0
-    to_tensor = transforms.ToTensor()
-    for i, item in enumerate(dataset):
-        if i >= max_samples:
-            break
-        img = item[image_key]
-        if hasattr(img, "convert"):
-            img = img.convert("RGB")
-        t = to_tensor(img)  # [0,1]
-        sums += t.view(3, -1).mean(dim=1)
-        sq_sums += (t.view(3, -1) ** 2).mean(dim=1)
-        count += 1
-    mean = (sums / count).tolist()
-    std = (sq_sums / count - torch.tensor(mean) ** 2).sqrt().tolist()
-    return mean, std
+def get_label_indices(dataset, allowed_labels):
+    label_to_indices = defaultdict(list)
+    for idx, (_, label) in enumerate(dataset):
+        label_to_indices[label].append(idx)
+    selected = []
+    for lab in allowed_labels:
+        selected.extend(label_to_indices[lab])
+    return selected
 
+# ----------------------
+# 3. Hàm Huấn luyện
+# ----------------------
 
-def build_transform(mean, std):
-    return transforms.Compose([
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-    ])
+def train_gan(dataloader, nz=100, epochs=50, lr=2e-4, betas=(0.5, 0.999), save_path='generator.pkl'):
+    # Sử dụng Generator/Discriminator đã import
+    gen = Generator(nz=nz).to(device)
+    disc = Discriminator().to(device)
 
+    optimG = optim.Adam(gen.parameters(), lr=lr, betas=betas)
+    optimD = optim.Adam(disc.parameters(), lr=lr, betas=betas)
+    criterion = nn.BCELoss()
+    fixed_noise = torch.randn(16, nz, device=device)
 
-class ImageTextCollator:
-    """
-    Top-level collate to stay picklable on Windows. Applies transform and tokenization.
-    """
-    def __init__(self, transform):
-        self.transform = transform
+    for epoch in range(1, epochs+1):
+        pbar = tqdm.tqdm(dataloader, desc=f'Epoch {epoch}/{epochs}', leave=False)
+        for real_imgs, _ in pbar:
+            bs = real_imgs.size(0)
+            real_imgs = real_imgs.to(device)
+            # ... (Phần code huấn luyện D và G y hệt như Cell 4)
+            
+            # Train Discriminator
+            optimD.zero_grad()
+            real_labels = torch.ones(bs, 1, device=device)
+            fake_labels = torch.zeros(bs, 1, device=device)
+            outputs_real = disc(real_imgs)
+            lossD_real = criterion(outputs_real, real_labels)
+            noise = torch.randn(bs, nz, device=device)
+            fake_imgs = gen(noise)
+            outputs_fake = disc(fake_imgs.detach())
+            lossD_fake = criterion(outputs_fake, fake_labels)
+            lossD = (lossD_real + lossD_fake) * 0.5
+            lossD.backward()
+            optimD.step()
 
-    def __call__(self, batch):
-        images = torch.stack([self.transform(item["image"].convert("RGB")) for item in batch])
-        texts = [item["recaption"] for item in batch]
-        token_ids, lengths = tokenize_batch(texts, vocab_size=4096, max_len=32)
-        return images, token_ids
+            # Train Generator
+            optimG.zero_grad()
+            outputs_fake_forG = disc(fake_imgs)
+            lossG = criterion(outputs_fake_forG, real_labels)
+            lossG.backward()
+            optimG.step()
+            
+            pbar.set_postfix({'lossD': lossD.item(), 'lossG': lossG.item()})
 
+        # end epoch
+        with torch.no_grad():
+            sample = gen(fixed_noise)
+        print(f'Epoch {epoch}: lossD={lossD.item():.4f}, lossG={lossG.item():.4f}')
 
-def get_dataloaders(batch_size=128):
-    """
-    Uses HF dataset with captions: wangherr/coco2017_train_512x_image_caption_canny (image, text).
-    """
-    dataset = load_dataset("UCSC-VLAA/Recap-COCO-30K")
-
-    # Compute normalization stats from a subset for faster convergence
-    mean, std = compute_mean_std(dataset["train"], image_key="image", max_samples=256)
-    transform_image = build_transform(mean, std)
-
-    collate = ImageTextCollator(transform_image)
-
-    num_workers = 4
-    trainloader = torch.utils.data.DataLoader(
-        dataset['train'], batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), collate_fn=collate
-    )
-    # The dataset has no official val split; use a small held-out subset for quick eval
-    val_subset = dataset['train'].select(range(0, min(1000, len(dataset['train']))))
-    testloader = torch.utils.data.DataLoader(
-        val_subset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), collate_fn=collate
-    )
-
-    # Debug info to ensure consistent epoch length across GPU counts
-    print(f"[Data] train samples: {len(dataset['train'])}, val samples: {len(val_subset)}, "
-          f"batch_size: {batch_size}, steps/epoch (train): {len(trainloader)}")
-
-    return trainloader, testloader
-
-
-def train(model, trainloader, criterion, optimizer, device, epoch, latent_dim):
-    model.train()
-    running_loss = 0.0
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.startswith("cuda")))
-    for i, (images, token_ids) in enumerate(trainloader):
-        images = images.to(device)
-        token_ids = token_ids.to(device)
-        noise = torch.randn(images.size(0), latent_dim, device=device)
-
-        optimizer.zero_grad()
-
-        with torch.cuda.amp.autocast(enabled=(device.startswith("cuda"))):
-            outputs = model(token_ids, noise)
-            if outputs.shape[-2:] != images.shape[-2:]:
-                outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
-            loss = criterion(outputs, images)
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        running_loss += loss.item()
-
-        if i % 100 == 99:
-            print(f'[Epoch {epoch}, Batch {i + 1}] L1 loss: {running_loss / 100:.4f}')
-            running_loss = 0.0
-
-
-def evaluate(model, testloader, criterion, device, latent_dim):
-    model.eval()
-    test_loss = 0
-    with torch.no_grad():
-        for images, token_ids in testloader:
-            images = images.to(device)
-            token_ids = token_ids.to(device)
-            noise = torch.randn(images.size(0), latent_dim, device=device)
-            with torch.cuda.amp.autocast(enabled=(device.startswith("cuda"))):
-                outputs = model(token_ids, noise)
-                if outputs.shape[-2:] != images.shape[-2:]:
-                    outputs = F.interpolate(outputs, size=images.shape[-2:], mode="bilinear", align_corners=False)
-                loss = criterion(outputs, images)
-            test_loss += loss.item()
-
-    avg_loss = test_loss / len(testloader)
-    print(f'Val L1 Loss: {avg_loss:.4f}')
-    return -avg_loss  # higher is better for checkpointing
-
-
-def main():
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
-
-    os.makedirs('checkpoints', exist_ok=True)
-
-    # Hyperparameters
-    BATCH_SIZE = 32
-    EPOCHS = 20
-    LR = 3e-4
-    
-    # Data
-    trainloader, testloader = get_dataloaders(BATCH_SIZE)
-
-    print("Building larger text-to-image generator (Transformer text encoder + ResUpsample generator)...")
-    cfg = LargeT2IConfig(
-        vocab_size=4096,
-        max_len=32,
-        text_embed_dim=512,
-        text_heads=8,
-        text_layers=6,
-        text_ff=1024,
-        latent_dim=128,
-        base_channels=256,
-        target_size=IMAGE_SIZE,
-    )
-    model = LargeTextToImageModel(cfg).to(device)
-
-    # Optional: simple DataParallel across all visible GPUs (helps utilize 2×T4)
-    if torch.cuda.device_count() > 1:
-        print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
-        model = torch.nn.DataParallel(model)
-
-    # latent_dim needed for noise sampling; handle DataParallel wrapper
-    latent_dim = model.module.latent_dim if isinstance(model, torch.nn.DataParallel) else model.latent_dim
-
-    criterion = nn.L1Loss()
-    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-
-    best_score = float("-inf")
-    
-    for epoch in range(EPOCHS):
-        train(model, trainloader, criterion, optimizer, device, epoch, latent_dim)
-        score = evaluate(model, testloader, criterion, device, latent_dim)
-        scheduler.step()
-
-        if score > best_score:
-            print(f'Saving best model (score: {score:.4f})')
-            target = model.module if isinstance(model, torch.nn.DataParallel) else model
-            torch.save({
-                "text_encoder": target.text_encoder.state_dict(),
-                "generator": target.generator.state_dict(),
-            }, "checkpoints/text2img_small.pth")
-            best_score = score
-
-    print('Finished Training')
+    # Save the full generator object
+    save_full_path = OUT_DIR / save_path
+    # Chỉ lưu state_dict để dễ tải lại và merge
+    torch.save(gen.state_dict(), str(save_full_path))
+    print('Saved generator state_dict to', save_full_path)
+    return gen, disc
 
 
 if __name__ == '__main__':
-    main()
+    # Prepare dataloaders for digits 0-4 and 5-9
+    batch_size = 128
+    indices_0_4 = get_label_indices(mnist_train, allowed_labels=list(range(0,5)))
+    indices_5_9 = get_label_indices(mnist_train, allowed_labels=list(range(5,10)))
+    sub_0_4 = Subset(mnist_train, indices_0_4)
+    sub_5_9 = Subset(mnist_train, indices_5_9)
+    loader_0_4 = DataLoader(sub_0_4, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    loader_5_9 = DataLoader(sub_5_9, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+
+    # Train both GANs
+    EPOCHS = 50 
+    print('Training GAN for digits 0-4...')
+    # Đổi tên file checkpoint
+    gen_0_4, _ = train_gan(loader_0_4, epochs=EPOCHS, save_path='generator_gan_0_4.pth')
+
+    print('\nTraining GAN for digits 5-9...')
+    gen_5_9, _ = train_gan(loader_5_9, epochs=EPOCHS, save_path='generator_gan_5_9.pth')
+    
+    print('Training Complete.')

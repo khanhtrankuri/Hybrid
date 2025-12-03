@@ -1,76 +1,99 @@
+# predict.py
+
 import argparse
 import os
-from typing import Optional
-
 import torch
 import torchvision.transforms as transforms
+import matplotlib.pyplot as plt
+import numpy as np
 
-from architech.archi import TextToImageModel, tokenize_batch
-from architech.archi_large import LargeTextToImageModel, LargeT2IConfig
+# Import Generator mới
+from architech.archi_gan import Generator 
 
-def load_model(checkpoint_path: str, device: str):
-    cfg = LargeT2IConfig(
-        vocab_size=4096,
-        max_len=32,
-        text_embed_dim=512,
-        text_heads=8,
-        text_layers=6,
-        text_ff=1024,
-        latent_dim=128,
-        base_channels=256,
-        target_size=256,
-    )
-    model = LargeTextToImageModel(cfg)
+def load_generator(checkpoint_path: str, device: str):
+    """Tải mô hình Generator đã hợp nhất"""
+    model = Generator().to(device)
+    
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        
     state = torch.load(checkpoint_path, map_location=device)
-    model.text_encoder.load_state_dict(state["text_encoder"])
-    model.generator.load_state_dict(state["generator"])
-    model.to(device)
+    model.load_state_dict(state)
     model.eval()
     return model
 
-
-def save_tensor_image(tensor: torch.Tensor, path: str, out_size: int | None = None):
-    # tensor expected shape (3, H, W), range [-1, 1]
-    img = tensor.clamp(-1, 1)
-    img = (img + 1) / 2.0
-    to_pil = transforms.ToPILImage()
-    pil = to_pil(img.cpu())
-    if out_size is not None:
-        pil = pil.resize((out_size, out_size))
-    pil.save(path)
-
-
-def predict(prompt: str, checkpoint: str, device: str, seed: Optional[int], out_path: str, out_size: Optional[int]):
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    model = load_model(checkpoint, device)
-    token_ids, _ = tokenize_batch([prompt], vocab_size=4096, max_len=getattr(model, "max_len", 16))
-    token_ids = token_ids.to(device)
-
-    noise = torch.randn(1, model.latent_dim, device=device)
+def generate_images(model, nz: int, num_images: int, device: str, out_path: str):
+    print(f"Generating {num_images} images from the merged generator...")
+    
+    # Tạo nhiễu ngẫu nhiên
+    noise = torch.randn(num_images, nz, device=device)
+    
     with torch.no_grad():
-        img = model(token_ids, noise)[0]
-    save_tensor_image(img, out_path, out_size)
-    return out_path
+        # Sinh ảnh
+        imgs = model(noise).cpu()
+    
+    # Đưa ảnh về phạm vi [0, 1] và chuyển sang numpy
+    imgs = (imgs + 1) / 2
+    
+    # Vẽ và lưu ảnh
+    cols = int(np.ceil(np.sqrt(num_images)))
+    rows = int(np.ceil(num_images / cols))
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(cols*1.2, rows*1.2))
+    axes = axes.flatten()
+    
+    for i in range(num_images):
+        if i < len(axes):
+            ax = axes[i]
+            # Loại bỏ kênh (vì là ảnh grayscale 1x28x28)
+            ax.imshow(imgs[i].squeeze(), cmap='gray')
+            ax.axis('off')
+            
+    # Tắt các subplot thừa
+    for i in range(num_images, len(axes)):
+        fig.delaxes(axes[i])
+        
+    plt.tight_layout()
+    plt.savefig(out_path)
+    print(f"Saved generated images to: {out_path}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate an image from text using the tiny text-to-image model.")
-    parser.add_argument("--text", required=True, help="Input prompt text")
-    parser.add_argument("--checkpoint", default="checkpoints/text2img_small.pth", help="Path to trained checkpoint")
-    parser.add_argument("--out", default="generated.png", help="Path to save generated image")
+    parser = argparse.ArgumentParser(description="Generate images using the merged GAN generator.")
+    parser.add_argument("--checkpoint", default="checkpoints/generator_gan_merged_0_9.pth", help="Path to the merged generator checkpoint")
+    parser.add_argument("--out", default="generated_0_9_merged.png", help="Path to save generated image grid")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="cpu or cuda")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
-    parser.add_argument("--out-size", type=int, default=None, help="Resize output image to this square size (pixels); default keeps model output size")
+    parser.add_argument("--nz", type=int, default=100, help="Latent dimension size (nz)")
+    parser.add_argument("--num_images", type=int, default=36, help="Number of images to generate")
     args = parser.parse_args()
 
-    if not os.path.isfile(args.checkpoint):
-        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
-
-    out_path = predict(args.text, args.checkpoint, args.device, args.seed, args.out, args.out_size)
-    print(f"Saved generated image to: {out_path}")
-
+    device = args.device
+    
+    # Tải model
+    model = load_generator(args.checkpoint, device)
+    
+    # Sinh ảnh
+    generate_images(model, args.nz, args.num_images, device, args.out)
 
 if __name__ == "__main__":
-    main()
+    # Thay thế phần này bằng code main()
+    # Để chạy trong môi trường Jupyter/Kaggle mà không cần argparse:
+    
+    # Khởi tạo giả định (nếu không dùng terminal)
+    class Args:
+        checkpoint = "checkpoints/generator_gan_merged_0_9.pth"
+        out = "generated_0_9_merged.png"
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        nz = 100
+        num_images = 36
+        
+    args = Args()
+    
+    # Tải và sinh ảnh (Sử dụng code main() nhưng thay thế argparse)
+    try:
+        model = load_generator(args.checkpoint, args.device)
+        generate_images(model, args.nz, args.num_images, args.device, args.out)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}. Vui lòng chạy main.py trước để tạo checkpoint.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
