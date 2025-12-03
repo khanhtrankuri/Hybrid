@@ -6,16 +6,21 @@ import torch
 import torchvision.transforms as transforms
 
 from architech.archi import TextToImageModel, tokenize_batch
-
+from architech.archi_large import LargeTextToImageModel, LargeT2IConfig
 
 def load_model(checkpoint_path: str, device: str):
-    model = TextToImageModel(
+    cfg = LargeT2IConfig(
         vocab_size=4096,
-        text_embed_dim=128,
-        text_hidden_dim=256,
-        latent_dim=64,
-        base_channels=128,
+        max_len=32,
+        text_embed_dim=512,
+        text_heads=8,
+        text_layers=6,
+        text_ff=1024,
+        latent_dim=128,
+        base_channels=256,
+        target_size=256,
     )
+    model = LargeTextToImageModel(cfg)
     state = torch.load(checkpoint_path, map_location=device)
     model.text_encoder.load_state_dict(state["text_encoder"])
     model.generator.load_state_dict(state["generator"])
@@ -40,13 +45,12 @@ def predict(prompt: str, checkpoint: str, device: str, seed: Optional[int], out_
         torch.manual_seed(seed)
 
     model = load_model(checkpoint, device)
-    token_ids, lengths = tokenize_batch([prompt], vocab_size=4096, max_len=16)
+    token_ids, _ = tokenize_batch([prompt], vocab_size=4096, max_len=getattr(model, "max_len", 16))
     token_ids = token_ids.to(device)
-    lengths = lengths.to(device)
 
     noise = torch.randn(1, model.latent_dim, device=device)
     with torch.no_grad():
-        img = model(token_ids, lengths, noise)[0]
+        img = model(token_ids, noise)[0]
     save_tensor_image(img, out_path, out_size)
     return out_path
 
