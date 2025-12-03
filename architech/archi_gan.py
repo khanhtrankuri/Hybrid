@@ -2,10 +2,6 @@
 import torch.nn as nn
 import torch
 
-# ----------------------------------------
-# Định nghĩa Model Generator và Discriminator
-# ----------------------------------------
-
 class Generator(nn.Module):
     """Mô hình Generator MLP cho MNIST/GAN cơ bản"""
     def __init__(self, nz: int = 100, img_dim: int = 28*28, hidden: int = 256):
