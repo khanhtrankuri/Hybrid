@@ -7,11 +7,9 @@ import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Import Generator mới
 from architech.archi_gan import Generator 
 
 def load_generator(checkpoint_path: str, device: str):
-    """Tải mô hình Generator đã hợp nhất"""
     model = Generator().to(device)
     
     if not os.path.isfile(checkpoint_path):
@@ -25,17 +23,13 @@ def load_generator(checkpoint_path: str, device: str):
 def generate_images(model, nz: int, num_images: int, device: str, out_path: str):
     print(f"Generating {num_images} images from the merged generator...")
     
-    # Tạo nhiễu ngẫu nhiên
     noise = torch.randn(num_images, nz, device=device)
     
     with torch.no_grad():
-        # Sinh ảnh
         imgs = model(noise).cpu()
     
-    # Đưa ảnh về phạm vi [0, 1] và chuyển sang numpy
     imgs = (imgs + 1) / 2
     
-    # Vẽ và lưu ảnh
     cols = int(np.ceil(np.sqrt(num_images)))
     rows = int(np.ceil(num_images / cols))
     
@@ -45,11 +39,9 @@ def generate_images(model, nz: int, num_images: int, device: str, out_path: str)
     for i in range(num_images):
         if i < len(axes):
             ax = axes[i]
-            # Loại bỏ kênh (vì là ảnh grayscale 1x28x28)
             ax.imshow(imgs[i].squeeze(), cmap='gray')
             ax.axis('off')
             
-    # Tắt các subplot thừa
     for i in range(num_images, len(axes)):
         fig.delaxes(axes[i])
         
@@ -69,17 +61,12 @@ def main():
 
     device = args.device
     
-    # Tải model
     model = load_generator(args.checkpoint, device)
     
-    # Sinh ảnh
     generate_images(model, args.nz, args.num_images, device, args.out)
 
 if __name__ == "__main__":
-    # Thay thế phần này bằng code main()
-    # Để chạy trong môi trường Jupyter/Kaggle mà không cần argparse:
     
-    # Khởi tạo giả định (nếu không dùng terminal)
     class Args:
         checkpoint = "checkpoints/generator_gan_merged_0_9.pth"
         out = "generated_0_9_merged.png"
@@ -89,7 +76,6 @@ if __name__ == "__main__":
         
     args = Args()
     
-    # Tải và sinh ảnh (Sử dụng code main() nhưng thay thế argparse)
     try:
         model = load_generator(args.checkpoint, args.device)
         generate_images(model, args.nz, args.num_images, args.device, args.out)
