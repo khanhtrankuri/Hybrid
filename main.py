@@ -33,13 +33,20 @@ def train():
         num_experts=4
     ).to(DEVICE)
 
+    # Loss Function (CLIP-style Contrastive Loss)
+    # Learnable temperature parameter
+    # Create tensor on device first, then wrap in Parameter to keep it as a leaf
+    logit_scale = nn.Parameter(torch.tensor(np.log(1 / 0.07), device=DEVICE))
+    
     # Optimizer - Weight Decay separation
     param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
     decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
     nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+    
     optim_groups = [
         {'params': decay_params, 'weight_decay': 0.1}, # Strong weight decay for weights
-        {'params': nodecay_params, 'weight_decay': 0.0} # No decay for biases/norms
+        {'params': nodecay_params, 'weight_decay': 0.0}, # No decay for biases/norms
+        {'params': [logit_scale], 'weight_decay': 0.0}   # Logit scale (no decay)
     ]
     
     # Increased learning rate slightly for OneCycle/Cosine
@@ -67,17 +74,9 @@ def train():
         div_factor=10.0,
         final_div_factor=100.0
     )
-
-    # Loss Function (CLIP-style Contrastive Loss)
-    # Learnable temperature parameter
-    # Create tensor on device first, then wrap in Parameter to keep it as a leaf
-    logit_scale = nn.Parameter(torch.tensor(np.log(1 / 0.07), device=DEVICE))
-    
-    # Important: Optimize logit_scale as well. It was missing from optimizer before!
-    optimizer.add_param_group({'params': [logit_scale], 'weight_decay': 0.0, 'lr': lr_peak})
     
     criterion = nn.CrossEntropyLoss()
-    scaler = torch.cuda.amp.GradScaler() # Mixed Precision
+    scaler = torch.amp.GradScaler('cuda') # Mixed Precision
 
     model.train()
     step = 0
@@ -96,7 +95,7 @@ def train():
             optimizer.zero_grad()
             
             # Context manager for Mixed Precision
-            with torch.cuda.amp.autocast(enabled=(DEVICE=="cuda")):
+            with torch.amp.autocast('cuda', enabled=(DEVICE=="cuda")):
                 outputs = model(image=images, text=input_ids)
                 
                 image_features = outputs["image_features"] # [B, D]
