@@ -70,7 +70,9 @@ def train():
 
     # Loss Function (CLIP-style Contrastive Loss)
     # Learnable temperature parameter
-    logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).to(DEVICE)
+    # Create tensor on device first, then wrap in Parameter to keep it as a leaf
+    logit_scale = nn.Parameter(torch.tensor(np.log(1 / 0.07), device=DEVICE))
+    
     # Important: Optimize logit_scale as well. It was missing from optimizer before!
     optimizer.add_param_group({'params': [logit_scale], 'weight_decay': 0.0, 'lr': lr_peak})
     
