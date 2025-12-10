@@ -124,7 +124,7 @@ def train():
             
             # Gradient Clipping (Unscale first)
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             scaler.step(optimizer)
             scaler.update()
@@ -135,7 +135,13 @@ def train():
             if step % LOG_INTERVAL == 0:
                 avg_loss = running_loss / LOG_INTERVAL if step > 0 else loss.item()
                 curr_lr = optimizer.param_groups[0]['lr']
-                print(f"Step [{step}/{MAX_STEPS}] | Loss: {avg_loss:.4f} | Scale: {logit_scale_clamped.item():.2f} | LR: {curr_lr:.2e}")
+                
+                # Calculate feature std for monitoring (on current batch)
+                with torch.no_grad():
+                    img_std = image_features.std(dim=0).mean().item()
+                    txt_std = text_features.std(dim=0).mean().item()
+                
+                print(f"Step [{step}/{MAX_STEPS}] | Loss: {avg_loss:.4f} | Scale: {logit_scale_clamped.item():.2f} | LR: {curr_lr:.2e} | Grad: {grad_norm:.2f} | Std: {img_std:.4f}/{txt_std:.4f}")
                 running_loss = 0.0
                 
             step += 1

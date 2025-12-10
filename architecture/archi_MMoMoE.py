@@ -105,6 +105,8 @@ class M2N2MoELayer(nn.Module):
     Efficient Implementation:
     Since x @ Sum(p_i * W_i) == Sum(p_i * (x @ W_i)), we compute the linear projections 
     for all experts and then average them. This avoids materializing the huge merged weight tensor.
+
+    NOTE: Includes sqrt(num_experts) scaling to preserve variance during aggregation.
     """
     def __init__(self, dim: int, hidden_dim: int, num_experts: int = 4, dropout: float = 0.0):
         super().__init__()
@@ -125,9 +127,9 @@ class M2N2MoELayer(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        nn.init.xavier_uniform_(self.experts_w1)
-        nn.init.xavier_uniform_(self.experts_w2)
-        nn.init.xavier_uniform_(self.experts_w3)
+        nn.init.trunc_normal_(self.experts_w1, std=0.02)
+        nn.init.trunc_normal_(self.experts_w2, std=0.02)
+        nn.init.trunc_normal_(self.experts_w3, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -142,8 +144,10 @@ class M2N2MoELayer(nn.Module):
         
         # 2. Aggregation (Parameter Merging)
         # We want to compute: h = Activation( x @ W_merged )
-        # W_merged = Sum(p_i * W_i)
-        # x @ W_merged = Sum(p_i * (x @ W_i))
+        # Variance Preservation: When averaging N independent zero-mean variables, 
+        # variance drops by 1/N. We scale by sqrt(N) to roughly maintain magnitude.
+        # This is crucial for deep networks with random init.
+        scale_factor = math.sqrt(self.num_experts)
         
         # Reshape x for broadcasting: [B, L, 1, D]
         x_reshaped = x.unsqueeze(2) 
@@ -163,28 +167,18 @@ class M2N2MoELayer(nn.Module):
         
         # Aggregate Pre-Activations
         # Sum(p_i * out_i) -> [B, L, H]
-        # gate_probs: [B, L, E]
-        # out: [B, L, E, H]
-        # result: [B, L, H]
-        merged_w1 = torch.einsum('ble,bleh->blh', gate_probs, out_w1)
-        merged_w2 = torch.einsum('ble,bleh->blh', gate_probs, out_w2)
+        merged_w1 = torch.einsum('ble,bleh->blh', gate_probs, out_w1) * scale_factor
+        merged_w2 = torch.einsum('ble,bleh->blh', gate_probs, out_w2) * scale_factor
         
         # 3. Activation (SwiGLU) applied on the MERGED representation
-        # This is the key difference from standard MoE
         hidden = F.silu(merged_w1) * merged_w2
         
         # 4. Second Layer Aggregation
-        # We need to compute: hidden @ Sum(p_i * W3_i)
-        # = Sum(p_i * (hidden @ W3_i))
-        
         # W3 projection for all experts
-        # hidden: [B, L, H]
-        # W3: [E, H, D]
-        # Out: [B, L, E, D]
         out_w3 = torch.einsum('blh,ehd->bled', hidden, self.experts_w3)
         
         # Aggregate
-        output = torch.einsum('ble,bled->bld', gate_probs, out_w3)
+        output = torch.einsum('ble,bled->bld', gate_probs, out_w3) * scale_factor
         
         output = self.dropout(output)
         return output
